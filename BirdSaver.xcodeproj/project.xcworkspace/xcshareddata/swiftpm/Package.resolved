@@ -1,0 +1,14 @@
+{
+  "originHash" : "eb9b1ee179b2635f05cc904d4556840fb961fc8816dd4e3fd10a825e2f911ee2",
+  "pins" : [
+    {
+      "identity" : "xgraphqlkit",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/yyyywaiwai/XGraphQLkit.git",
+      "state" : {
+        "revision" : "494d04a5bfbd61353d8f666ee4ce8ccbe619afb6"
+      }
+    }
+  ],
+  "version" : 3
+}

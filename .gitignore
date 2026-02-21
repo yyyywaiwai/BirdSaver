@@ -1,0 +1,9 @@
+# macOS
+.DS_Store
+
+# Xcode user-specific data
+*.xcuserstate
+**/xcuserdata/
+
+# SwiftPM
+.build/
