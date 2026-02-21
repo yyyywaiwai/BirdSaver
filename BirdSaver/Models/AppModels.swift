@@ -39,6 +39,8 @@ struct DownloadConfig: Equatable {
     let screenName: String
     let maxPosts: Int
     let includeOwnPostsOnly: Bool
+    let includePhotos: Bool
+    let includeVideos: Bool
     let baseDirectory: URL
 
     nonisolated var normalizedScreenName: String {
@@ -140,4 +142,9 @@ struct TimelineMediaResult {
     let tasks: [MediaDownloadTask]
     let scannedPosts: Int
     let reachedPostLimit: Bool
+}
+
+struct TimelineFetchProgress: Sendable, Equatable {
+    let scannedPosts: Int
+    let collectedTasks: Int
 }

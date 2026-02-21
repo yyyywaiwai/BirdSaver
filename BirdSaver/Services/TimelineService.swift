@@ -2,7 +2,11 @@ import Foundation
 import XGraphQLkit
 
 actor TimelineService {
-    func collectMediaTasks(config: DownloadConfig, auth: XAuthContext) async throws -> TimelineMediaResult {
+    func collectMediaTasks(
+        config: DownloadConfig,
+        auth: XAuthContext,
+        onProgress: (@Sendable (TimelineFetchProgress) async -> Void)? = nil
+    ) async throws -> TimelineMediaResult {
         let normalizedScreenName = config.normalizedScreenName
         let targetScreenName = normalizedScreenName.lowercased()
 
@@ -15,6 +19,12 @@ actor TimelineService {
         var scannedPosts = 0
         var tasks: [MediaDownloadTask] = []
         var seenURLs = Set<String>()
+
+        await emitProgress(
+            scannedPosts: scannedPosts,
+            collectedTasks: tasks.count,
+            onProgress: onProgress
+        )
 
         while scannedPosts < config.clampedMaxPosts {
             try Task.checkCancellation()
@@ -54,16 +64,42 @@ actor TimelineService {
                 }
             }
 
+            await emitProgress(
+                scannedPosts: scannedPosts,
+                collectedTasks: tasks.count,
+                onProgress: onProgress
+            )
+
             cursor = page.nextCursor
             if cursor == nil {
                 break
             }
         }
 
+        await emitProgress(
+            scannedPosts: scannedPosts,
+            collectedTasks: tasks.count,
+            onProgress: onProgress
+        )
+
         return TimelineMediaResult(
             tasks: tasks,
             scannedPosts: scannedPosts,
             reachedPostLimit: scannedPosts >= config.clampedMaxPosts
+        )
+    }
+
+    private func emitProgress(
+        scannedPosts: Int,
+        collectedTasks: Int,
+        onProgress: (@Sendable (TimelineFetchProgress) async -> Void)?
+    ) async {
+        guard let onProgress else { return }
+        await onProgress(
+            TimelineFetchProgress(
+                scannedPosts: scannedPosts,
+                collectedTasks: collectedTasks
+            )
         )
     }
 
@@ -74,6 +110,9 @@ actor TimelineService {
 
         switch kind {
         case .photo:
+            guard config.includePhotos else {
+                return nil
+            }
             let ext = fileExtension(from: media.url, fallback: "jpg")
             let targetURL = config.photosDirectory.appendingPathComponent("\(baseFileName).\(ext)")
             return MediaDownloadTask(
@@ -85,6 +124,11 @@ actor TimelineService {
             )
 
         case .video, .animatedGif:
+            // XGraphQLkit の XSearchTimelineType.videos と同様に
+            // video + animatedGif を動画カテゴリとして扱う。
+            guard config.includeVideos else {
+                return nil
+            }
             let targetURL = config.videosDirectory.appendingPathComponent("\(baseFileName).mp4")
             return MediaDownloadTask(
                 postID: postID,
