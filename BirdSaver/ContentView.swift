@@ -70,8 +70,8 @@ struct ContentView: View {
 
       if isSetupExpanded {
         VStack(alignment: .leading, spacing: 12) {
-          setupField(title: "ユーザー名 / URL入力") {
-            TextField("テキストフィールド", text: $viewModel.screenName)
+          setupField(title: "ユーザー名 / ユーザーURL / 投稿URL") {
+            TextField("@username または https://x.com/... を入力", text: $viewModel.screenName)
               .textFieldStyle(.roundedBorder)
           }
 

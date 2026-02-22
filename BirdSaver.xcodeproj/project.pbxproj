@@ -349,7 +349,7 @@
 			repositoryURL = "https://github.com/yyyywaiwai/XGraphQLkit.git";
 			requirement = {
 				kind = revision;
-				revision = 494d04a5bfbd61353d8f666ee4ce8ccbe619afb6;
+				revision = 13fbad761b783400261c93a1e2126c46fac559e6;
 			};
 		};
 /* End XCRemoteSwiftPackageReference section */

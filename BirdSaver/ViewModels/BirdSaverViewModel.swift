@@ -10,6 +10,25 @@ final class BirdSaverViewModel: ObservableObject {
         var id: String { rawValue }
     }
 
+    private enum FetchMode {
+        case timeline
+        case singlePost
+    }
+
+    private enum FetchTarget {
+        case timeline(screenName: String)
+        case singlePost(postURL: URL, screenName: String)
+
+        var mode: FetchMode {
+            switch self {
+            case .timeline:
+                return .timeline
+            case .singlePost:
+                return .singlePost
+            }
+        }
+    }
+
     @Published var screenName: String
     @Published var maxPosts: Int
     @Published var includePhotos: Bool
@@ -54,8 +73,34 @@ final class BirdSaverViewModel: ObservableObject {
     private var finishedTaskIDSet = Set<String>()
     private var pendingStateUpdates: [String: (MediaDownloadTask, DownloadItemState)] = [:]
     private var pendingFlushTask: Task<Void, Never>?
+    private var currentFetchMode: FetchMode = .timeline
 
     private static let uiFlushIntervalNanos: UInt64 = 80_000_000
+    private static let supportedXHosts: Set<String> = [
+        "x.com",
+        "www.x.com",
+        "twitter.com",
+        "www.twitter.com",
+        "mobile.x.com",
+        "mobile.twitter.com"
+    ]
+    private static let reservedUserPathComponents: Set<String> = [
+        "home",
+        "explore",
+        "search",
+        "i",
+        "messages",
+        "notifications",
+        "settings",
+        "compose",
+        "intent",
+        "share",
+        "hashtag",
+        "login",
+        "signup",
+        "tos",
+        "privacy"
+    ]
 
     init(
         authService: AuthService,
@@ -113,15 +158,17 @@ final class BirdSaverViewModel: ObservableObject {
     }
 
     var timelineStatusText: String {
+        let subject = currentFetchMode == .singlePost ? "投稿" : "タイムライン"
+
         if isFetchingTimeline {
-            return "タイムライン取得中: 走査 \(scannedPosts)件 / キュー \(timelineCollectedTaskCount)件"
+            return "\(subject)取得中: 走査 \(scannedPosts)件 / キュー \(timelineCollectedTaskCount)件"
         }
 
         if scannedPosts > 0 || progressTotal > 0 {
-            return "タイムライン取得: 走査 \(scannedPosts)件 / キュー \(progressTotal)件"
+            return "\(subject)取得: 走査 \(scannedPosts)件 / キュー \(progressTotal)件"
         }
 
-        return "タイムライン未取得"
+        return "\(subject)未取得"
     }
 
     func task(for id: String) -> MediaDownloadTask? {
@@ -182,9 +229,14 @@ final class BirdSaverViewModel: ObservableObject {
             return
         }
 
-        let normalizedName = normalizeScreenName(screenName)
-        guard !normalizedName.isEmpty else {
-            statusMessage = "screenName を入力してください"
+        let rawInput = screenName.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !rawInput.isEmpty else {
+            statusMessage = "ユーザー名 / ユーザーURL / 投稿URL を入力してください"
+            return
+        }
+
+        guard let fetchTarget = resolveFetchTarget(from: rawInput) else {
+            statusMessage = "入力形式が不正です。ユーザー名 / ユーザーURL / 投稿URL を確認してください"
             return
         }
 
@@ -193,11 +245,19 @@ final class BirdSaverViewModel: ObservableObject {
             return
         }
 
+        let targetScreenName: String
+        switch fetchTarget {
+        case .timeline(let screenName):
+            targetScreenName = screenName
+        case .singlePost(_, let screenName):
+            targetScreenName = screenName
+        }
+
         let clampedMaxPosts = max(1, min(maxPosts, DownloadConfig.maxPostLimit))
         let clampedConcurrency = max(1, min(maxConcurrentDownloads, 8))
         let normalizedBaseDirectory = baseDirectoryURL.standardizedFileURL
         let config = DownloadConfig(
-            screenName: normalizedName,
+            screenName: targetScreenName,
             maxPosts: clampedMaxPosts,
             includeOwnPostsOnly: true,
             includePhotos: includePhotos,
@@ -205,7 +265,7 @@ final class BirdSaverViewModel: ObservableObject {
             baseDirectory: normalizedBaseDirectory
         )
 
-        settingsStore.screenName = normalizedName
+        settingsStore.screenName = rawInput
         settingsStore.maxPosts = clampedMaxPosts
         settingsStore.includePhotos = includePhotos
         settingsStore.includeVideos = includeVideos
@@ -213,18 +273,20 @@ final class BirdSaverViewModel: ObservableObject {
         settingsStore.baseDirectoryURL = normalizedBaseDirectory
 
         resetRunState()
+        currentFetchMode = fetchTarget.mode
         outputDirectory = config.userDirectory
 
         isRunning = true
         isCancelling = false
         isFetchingTimeline = true
-        statusMessage = "タイムラインを取得中..."
+        statusMessage = currentFetchMode == .singlePost ? "投稿を取得中..." : "タイムラインを取得中..."
 
         runningTask = Task {
             await runPipeline(
                 config: config,
                 authContext: authContext,
-                concurrency: clampedConcurrency
+                concurrency: clampedConcurrency,
+                fetchTarget: fetchTarget
             )
         }
     }
@@ -236,22 +298,45 @@ final class BirdSaverViewModel: ObservableObject {
         runningTask?.cancel()
     }
 
-    private func runPipeline(config: DownloadConfig, authContext: XAuthContext, concurrency: Int) async {
+    private func runPipeline(
+        config: DownloadConfig,
+        authContext: XAuthContext,
+        concurrency: Int,
+        fetchTarget: FetchTarget
+    ) async {
         do {
-            let timelineResult = try await timelineService.collectMediaTasks(
-                config: config,
-                auth: authContext,
-                onProgress: { [weak self] progress in
-                    await self?.applyTimelineProgress(progress)
-                }
-            )
+            let timelineResult: TimelineMediaResult
+            switch fetchTarget {
+            case .timeline:
+                timelineResult = try await timelineService.collectMediaTasks(
+                    config: config,
+                    auth: authContext,
+                    onProgress: { [weak self] progress in
+                        await self?.applyTimelineProgress(progress)
+                    }
+                )
+            case .singlePost(let postURL, _):
+                timelineResult = try await timelineService.collectMediaTasks(
+                    from: postURL,
+                    config: config,
+                    auth: authContext,
+                    onProgress: { [weak self] progress in
+                        await self?.applyTimelineProgress(progress)
+                    }
+                )
+            }
 
             isFetchingTimeline = false
             scannedPosts = timelineResult.scannedPosts
             timelineCollectedTaskCount = timelineResult.tasks.count
-            stopReasonMessage = timelineResult.reachedPostLimit
-                ? "投稿上限 \(config.clampedMaxPosts) 件に達したため停止しました"
-                : "タイムライン末尾まで取得しました"
+            switch fetchTarget {
+            case .timeline:
+                stopReasonMessage = timelineResult.reachedPostLimit
+                    ? "投稿上限 \(config.clampedMaxPosts) 件に達したため停止しました"
+                    : "タイムライン末尾まで取得しました"
+            case .singlePost:
+                stopReasonMessage = "投稿URLから単体取得しました"
+            }
 
             let tasks = timelineResult.tasks
             prepareQueueState(with: tasks)
@@ -291,7 +376,7 @@ final class BirdSaverViewModel: ObservableObject {
         scannedPosts = progress.scannedPosts
         timelineCollectedTaskCount = progress.collectedTasks
         if isFetchingTimeline {
-            statusMessage = "タイムラインを取得中..."
+            statusMessage = currentFetchMode == .singlePost ? "投稿を取得中..." : "タイムラインを取得中..."
         }
     }
 
@@ -334,6 +419,7 @@ final class BirdSaverViewModel: ObservableObject {
         timelineCollectedTaskCount = 0
         stopReasonMessage = ""
         isFetchingTimeline = false
+        currentFetchMode = .timeline
     }
 
     private func finishRun() {
@@ -451,11 +537,104 @@ final class BirdSaverViewModel: ObservableObject {
         finishedTaskIDs.removeAll { $0 == taskID }
     }
 
-    private func normalizeScreenName(_ raw: String) -> String {
-        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
-        if trimmed.hasPrefix("@") {
-            return String(trimmed.dropFirst())
+    private func resolveFetchTarget(from raw: String) -> FetchTarget? {
+        if let postInfo = parsePostURLInfo(from: raw) {
+            let resolvedScreenName = postInfo.screenName ?? "post_\(postInfo.postID)"
+            return .singlePost(
+                postURL: postInfo.normalizedURL,
+                screenName: resolvedScreenName
+            )
         }
-        return trimmed
+
+        if let screenName = parseUserScreenName(from: raw) {
+            return .timeline(screenName: screenName)
+        }
+
+        return nil
+    }
+
+    private func parsePostURLInfo(from raw: String) -> XPostURLInfo? {
+        if let info = XDirectClient.parsePostURL(raw) {
+            return info
+        }
+
+        guard let url = normalizedURLCandidate(from: raw) else {
+            return nil
+        }
+        return XDirectClient.parsePostURL(url)
+    }
+
+    private func parseUserScreenName(from raw: String) -> String? {
+        if let direct = normalizeScreenName(raw) {
+            return direct
+        }
+
+        guard let url = normalizedURLCandidate(from: raw),
+              let host = url.host?.lowercased(),
+              Self.supportedXHosts.contains(host) else {
+            return nil
+        }
+
+        let pathComponents = url.path.split(separator: "/").map(String.init)
+        guard let first = pathComponents.first else {
+            return nil
+        }
+
+        let firstLowercased = first.lowercased()
+        guard !Self.reservedUserPathComponents.contains(firstLowercased) else {
+            return nil
+        }
+
+        return normalizeScreenName(first)
+    }
+
+    private func normalizedURLCandidate(from raw: String) -> URL? {
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else {
+            return nil
+        }
+
+        if let url = URL(string: trimmed), let scheme = url.scheme?.lowercased(), scheme == "http" || scheme == "https" {
+            return url
+        }
+
+        if trimmed.contains("://") {
+            return nil
+        }
+
+        let lowercased = trimmed.lowercased()
+        if lowercased.hasPrefix("x.com/") ||
+            lowercased.hasPrefix("www.x.com/") ||
+            lowercased.hasPrefix("twitter.com/") ||
+            lowercased.hasPrefix("www.twitter.com/") ||
+            lowercased.hasPrefix("mobile.x.com/") ||
+            lowercased.hasPrefix("mobile.twitter.com/") {
+            return URL(string: "https://\(trimmed)")
+        }
+
+        return nil
+    }
+
+    private func normalizeScreenName(_ raw: String) -> String? {
+        var value = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        if let decoded = value.removingPercentEncoding {
+            value = decoded
+        }
+
+        if value.hasPrefix("@") {
+            value.removeFirst()
+        }
+
+        value = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !value.isEmpty else {
+            return nil
+        }
+
+        guard value.range(of: #"^[A-Za-z0-9_]{1,15}$"#, options: .regularExpression) != nil else {
+            return nil
+        }
+
+        return value
     }
 }
