@@ -13,11 +13,13 @@ final class BirdSaverViewModel: ObservableObject {
     private enum FetchMode {
         case timeline
         case singlePost
+        case bookmarks
     }
 
     private enum FetchTarget {
         case timeline(screenName: String)
         case singlePost(postURL: URL, screenName: String)
+        case bookmarks
 
         var mode: FetchMode {
             switch self {
@@ -25,15 +27,32 @@ final class BirdSaverViewModel: ObservableObject {
                 return .timeline
             case .singlePost:
                 return .singlePost
+            case .bookmarks:
+                return .bookmarks
             }
         }
     }
 
     @Published var screenName: String
-    @Published var maxPosts: Int
+    @Published var downloadSource: DownloadSource
+    @Published var maxPosts: Int {
+        didSet {
+            let clampedValue = max(1, min(maxPosts, DownloadConfig.maxPostLimit))
+            if maxPosts != clampedValue {
+                maxPosts = clampedValue
+            }
+        }
+    }
     @Published var includePhotos: Bool
     @Published var includeVideos: Bool
-    @Published var maxConcurrentDownloads: Int
+    @Published var maxConcurrentDownloads: Int {
+        didSet {
+            let clampedValue = max(1, min(maxConcurrentDownloads, 8))
+            if maxConcurrentDownloads != clampedValue {
+                maxConcurrentDownloads = clampedValue
+            }
+        }
+    }
     @Published var baseDirectoryURL: URL
     @Published var activeSheet: ActiveSheet?
 
@@ -42,6 +61,7 @@ final class BirdSaverViewModel: ObservableObject {
     @Published private(set) var isRunning = false
     @Published private(set) var isCancelling = false
     @Published private(set) var isFetchingTimeline = false
+    @Published private(set) var runPhase: DownloadRunPhase = .idle
     @Published private(set) var statusMessage = "待機中"
     @Published private(set) var stopReasonMessage = ""
     @Published private(set) var scannedPosts = 0
@@ -114,10 +134,11 @@ final class BirdSaverViewModel: ObservableObject {
         self.settingsStore = settingsStore
 
         screenName = settingsStore.screenName
-        maxPosts = settingsStore.maxPosts
+        downloadSource = settingsStore.downloadSource
+        maxPosts = max(1, min(settingsStore.maxPosts, DownloadConfig.maxPostLimit))
         includePhotos = settingsStore.includePhotos
         includeVideos = settingsStore.includeVideos
-        maxConcurrentDownloads = settingsStore.maxConcurrentDownloads
+        maxConcurrentDownloads = max(1, min(settingsStore.maxConcurrentDownloads, 8))
         baseDirectoryURL = settingsStore.baseDirectoryURL
         lastRunAt = settingsStore.lastRunAt
 
@@ -157,8 +178,45 @@ final class BirdSaverViewModel: ObservableObject {
         includePhotos || includeVideos
     }
 
+    var sourceInputIssue: String? {
+        guard downloadSource == .userMedia else {
+            return nil
+        }
+
+        let rawInput = screenName.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !rawInput.isEmpty else {
+            return "ユーザー名、プロフィールURL、または投稿URLを入力してください"
+        }
+
+        guard resolveFetchTarget(from: rawInput) != nil else {
+            return "ユーザー名またはXのURLを確認してください"
+        }
+
+        return nil
+    }
+
+    var configurationIssue: String? {
+        if let sourceInputIssue {
+            return sourceInputIssue
+        }
+
+        guard hasAtLeastOneMediaTarget else {
+            return "画像か動画を1つ以上選択してください"
+        }
+
+        return nil
+    }
+
+    var isStartActionEnabled: Bool {
+        !isRunning && configurationIssue == nil
+    }
+
+    var startActionTitle: String {
+        isAuthenticated ? "取得を開始" : "Xにログイン"
+    }
+
     var timelineStatusText: String {
-        let subject = currentFetchMode == .singlePost ? "投稿" : "タイムライン"
+        let subject = fetchSubject
 
         if isFetchingTimeline {
             return "\(subject)取得中: 走査 \(scannedPosts)件 / キュー \(timelineCollectedTaskCount)件"
@@ -201,12 +259,17 @@ final class BirdSaverViewModel: ObservableObject {
     }
 
     func clearAuth() {
-        do {
-            try authService.clearAuthContext()
-            authContext = nil
-            statusMessage = "保存済み認証情報を削除しました"
-        } catch {
-            statusMessage = "認証情報削除に失敗: \(error.localizedDescription)"
+        statusMessage = "認証情報を削除中..."
+
+        Task { [weak self] in
+            guard let self else { return }
+            do {
+                try await authService.clearAuthContext()
+                authContext = nil
+                statusMessage = "認証情報とWebセッションを削除しました"
+            } catch {
+                statusMessage = "認証情報削除に失敗: \(error.localizedDescription)"
+            }
         }
     }
 
@@ -220,6 +283,30 @@ final class BirdSaverViewModel: ObservableObject {
         updateBaseDirectory(DownloadConfig.defaultBaseDirectory())
     }
 
+    func performPrimaryAction() {
+        if isAuthenticated {
+            startDownload()
+        } else {
+            openLogin()
+        }
+    }
+
+    func savePreferences() {
+        maxPosts = max(1, min(maxPosts, DownloadConfig.maxPostLimit))
+        maxConcurrentDownloads = max(1, min(maxConcurrentDownloads, 8))
+        baseDirectoryURL = baseDirectoryURL.standardizedFileURL
+
+        if downloadSource == .userMedia {
+            settingsStore.screenName = screenName.trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        settingsStore.downloadSource = downloadSource
+        settingsStore.maxPosts = maxPosts
+        settingsStore.includePhotos = includePhotos
+        settingsStore.includeVideos = includeVideos
+        settingsStore.maxConcurrentDownloads = maxConcurrentDownloads
+        settingsStore.baseDirectoryURL = baseDirectoryURL
+    }
+
     func startDownload() {
         guard !isRunning else { return }
 
@@ -230,14 +317,21 @@ final class BirdSaverViewModel: ObservableObject {
         }
 
         let rawInput = screenName.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !rawInput.isEmpty else {
-            statusMessage = "ユーザー名 / ユーザーURL / 投稿URL を入力してください"
-            return
-        }
+        let fetchTarget: FetchTarget
+        switch downloadSource {
+        case .userMedia:
+            guard !rawInput.isEmpty else {
+                statusMessage = "ユーザー名 / ユーザーURL / 投稿URL を入力してください"
+                return
+            }
 
-        guard let fetchTarget = resolveFetchTarget(from: rawInput) else {
-            statusMessage = "入力形式が不正です。ユーザー名 / ユーザーURL / 投稿URL を確認してください"
-            return
+            guard let resolvedTarget = resolveFetchTarget(from: rawInput) else {
+                statusMessage = "入力形式が不正です。ユーザー名 / ユーザーURL / 投稿URL を確認してください"
+                return
+            }
+            fetchTarget = resolvedTarget
+        case .bookmarks:
+            fetchTarget = .bookmarks
         }
 
         guard hasAtLeastOneMediaTarget else {
@@ -251,6 +345,8 @@ final class BirdSaverViewModel: ObservableObject {
             targetScreenName = screenName
         case .singlePost(_, let screenName):
             targetScreenName = screenName
+        case .bookmarks:
+            targetScreenName = "Bookmarks"
         }
 
         let clampedMaxPosts = max(1, min(maxPosts, DownloadConfig.maxPostLimit))
@@ -265,7 +361,10 @@ final class BirdSaverViewModel: ObservableObject {
             baseDirectory: normalizedBaseDirectory
         )
 
-        settingsStore.screenName = rawInput
+        if downloadSource == .userMedia {
+            settingsStore.screenName = rawInput
+        }
+        settingsStore.downloadSource = downloadSource
         settingsStore.maxPosts = clampedMaxPosts
         settingsStore.includePhotos = includePhotos
         settingsStore.includeVideos = includeVideos
@@ -279,7 +378,8 @@ final class BirdSaverViewModel: ObservableObject {
         isRunning = true
         isCancelling = false
         isFetchingTimeline = true
-        statusMessage = currentFetchMode == .singlePost ? "投稿を取得中..." : "タイムラインを取得中..."
+        runPhase = .fetching
+        statusMessage = "\(fetchSubject)を取得中..."
 
         runningTask = Task {
             await runPipeline(
@@ -294,6 +394,7 @@ final class BirdSaverViewModel: ObservableObject {
     func cancelDownload() {
         guard isRunning else { return }
         isCancelling = true
+        runPhase = .cancelling
         statusMessage = "キャンセル中..."
         runningTask?.cancel()
     }
@@ -324,6 +425,14 @@ final class BirdSaverViewModel: ObservableObject {
                         await self?.applyTimelineProgress(progress)
                     }
                 )
+            case .bookmarks:
+                timelineResult = try await timelineService.collectBookmarkMediaTasks(
+                    config: config,
+                    auth: authContext,
+                    onProgress: { [weak self] progress in
+                        await self?.applyTimelineProgress(progress)
+                    }
+                )
             }
 
             isFetchingTimeline = false
@@ -336,6 +445,10 @@ final class BirdSaverViewModel: ObservableObject {
                     : "タイムライン末尾まで取得しました"
             case .singlePost:
                 stopReasonMessage = "投稿URLから単体取得しました"
+            case .bookmarks:
+                stopReasonMessage = timelineResult.reachedPostLimit
+                    ? "ブックマークの投稿上限 \(config.clampedMaxPosts) 件に達したため停止しました"
+                    : "ブックマーク末尾まで取得しました"
             }
 
             let tasks = timelineResult.tasks
@@ -344,11 +457,13 @@ final class BirdSaverViewModel: ObservableObject {
             if tasks.isEmpty {
                 summary = .empty
                 failures = []
+                runPhase = .empty
                 statusMessage = "対象条件に一致するメディアが見つかりませんでした"
                 finishRun()
                 return
             }
 
+            runPhase = .downloading
             statusMessage = "メディアをダウンロード中..."
             let summary = await mediaDownloadService.downloadAll(
                 tasks: tasks,
@@ -360,12 +475,21 @@ final class BirdSaverViewModel: ObservableObject {
 
             self.summary = summary
             failures = summary.failures
+            if isCancelling {
+                runPhase = .cancelled
+            } else if summary.failed > 0 {
+                runPhase = .completedWithFailures
+            } else {
+                runPhase = .completed
+            }
             statusMessage = isCancelling ? "キャンセルしました" : "完了しました"
-            settingsStore.lastRunAt = Date()
+            settingsStore.lastRunAt = .now
             lastRunAt = settingsStore.lastRunAt
         } catch is CancellationError {
+            runPhase = .cancelled
             statusMessage = "キャンセルしました"
         } catch {
+            runPhase = .failed
             statusMessage = "処理に失敗: \(error.localizedDescription)"
         }
 
@@ -376,7 +500,18 @@ final class BirdSaverViewModel: ObservableObject {
         scannedPosts = progress.scannedPosts
         timelineCollectedTaskCount = progress.collectedTasks
         if isFetchingTimeline {
-            statusMessage = currentFetchMode == .singlePost ? "投稿を取得中..." : "タイムラインを取得中..."
+            statusMessage = "\(fetchSubject)を取得中..."
+        }
+    }
+
+    private var fetchSubject: String {
+        switch currentFetchMode {
+        case .timeline:
+            "タイムライン"
+        case .singlePost:
+            "投稿"
+        case .bookmarks:
+            "ブックマーク"
         }
     }
 
@@ -419,6 +554,7 @@ final class BirdSaverViewModel: ObservableObject {
         timelineCollectedTaskCount = 0
         stopReasonMessage = ""
         isFetchingTimeline = false
+        runPhase = .idle
         currentFetchMode = .timeline
     }
 

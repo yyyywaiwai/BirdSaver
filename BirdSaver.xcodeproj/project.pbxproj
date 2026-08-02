@@ -263,6 +263,7 @@
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
 				CODE_SIGN_ENTITLEMENTS = BirdSaver/BirdSaver.entitlements;
 				CODE_SIGN_STYLE = Automatic;
+				DEVELOPMENT_TEAM = FZ35ZF3CZV;
 				COMBINE_HIDPI_IMAGES = YES;
 				CURRENT_PROJECT_VERSION = 2;
 				ENABLE_APP_SANDBOX = YES;
@@ -295,6 +296,7 @@
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
 				CODE_SIGN_ENTITLEMENTS = BirdSaver/BirdSaver.entitlements;
 				CODE_SIGN_STYLE = Automatic;
+				DEVELOPMENT_TEAM = FZ35ZF3CZV;
 				COMBINE_HIDPI_IMAGES = YES;
 				CURRENT_PROJECT_VERSION = 2;
 				ENABLE_APP_SANDBOX = YES;
@@ -349,7 +351,7 @@
 			repositoryURL = "https://github.com/yyyywaiwai/XGraphQLkit.git";
 			requirement = {
 				kind = revision;
-				revision = 74d7488e9492df714bbf24da6e71ce709a437a90;
+				revision = f2c48d24e16ed562e2d80bc7cb2cf8cd175e112a;
 			};
 		};
 /* End XCRemoteSwiftPackageReference section */

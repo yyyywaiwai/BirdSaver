@@ -38,6 +38,14 @@ xcodebuild -project BirdSaver.xcodeproj -scheme BirdSaver -configuration Debug b
 xcodebuild -project BirdSaver.xcodeproj -scheme BirdSaver -configuration Release build
 ```
 
+実行可能な `.app` を `dist/BirdSaver.app` に生成する場合:
+
+```bash
+make app
+```
+
+Debug版は `make debug`、生成後すぐ起動する場合は `make open` を使用します。
+
 ## 使い方
 
 1. アプリ起動後にログインします。

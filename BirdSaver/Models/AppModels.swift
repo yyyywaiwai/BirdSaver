@@ -94,6 +94,9 @@ enum MediaDownloadKind: String, Codable, Hashable {
 
 struct MediaDownloadTask: Identifiable, Hashable {
   let postID: String
+  let postText: String
+  let authorScreenName: String
+  let postURL: URL
   let mediaID: String
   let sourceURL: URL
   let kind: MediaDownloadKind
@@ -101,6 +104,14 @@ struct MediaDownloadTask: Identifiable, Hashable {
 
   nonisolated var id: String {
     "\(postID)-\(mediaID)"
+  }
+
+  nonisolated var authorUserID: String? {
+    let trimmed = authorScreenName.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard !trimmed.isEmpty, trimmed.lowercased() != "i" else {
+      return nil
+    }
+    return trimmed.hasPrefix("@") ? trimmed : "@\(trimmed)"
   }
 }
 

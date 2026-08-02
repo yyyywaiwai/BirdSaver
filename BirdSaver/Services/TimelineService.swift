@@ -2,6 +2,64 @@ import Foundation
 import XGraphQLkit
 
 actor TimelineService {
+    func collectBookmarkMediaTasks(
+        config: DownloadConfig,
+        auth: XAuthContext,
+        onProgress: (@Sendable (TimelineFetchProgress) async -> Void)? = nil
+    ) async throws -> TimelineMediaResult {
+        let client = XDirectClient(auth: auth)
+        var cursor: String?
+        var seenCursors = Set<String>()
+        var scannedPosts = 0
+        var tasks: [MediaDownloadTask] = []
+        var seenURLs = Set<String>()
+
+        await emitProgress(
+            scannedPosts: scannedPosts,
+            collectedTasks: tasks.count,
+            onProgress: onProgress
+        )
+
+        while scannedPosts < config.clampedMaxPosts {
+            try Task.checkCancellation()
+
+            let page = try await client.listBookmarks(
+                count: 100,
+                cursor: cursor
+            )
+
+            if page.posts.isEmpty {
+                break
+            }
+
+            appendTasks(
+                from: page.posts,
+                config: config,
+                scannedPosts: &scannedPosts,
+                tasks: &tasks,
+                seenURLs: &seenURLs
+            )
+
+            await emitProgress(
+                scannedPosts: scannedPosts,
+                collectedTasks: tasks.count,
+                onProgress: onProgress
+            )
+
+            guard let nextCursor = page.nextCursor,
+                  seenCursors.insert(nextCursor).inserted else {
+                break
+            }
+            cursor = nextCursor
+        }
+
+        return TimelineMediaResult(
+            tasks: tasks,
+            scannedPosts: scannedPosts,
+            reachedPostLimit: scannedPosts >= config.clampedMaxPosts
+        )
+    }
+
     func collectMediaTasks(
         config: DownloadConfig,
         auth: XAuthContext,
@@ -53,7 +111,7 @@ actor TimelineService {
                 }
 
                 for media in post.media {
-                    guard let task = makeTask(from: media, postID: post.id, config: config) else {
+                    guard let task = makeTask(from: media, post: post, config: config) else {
                         continue
                     }
 
@@ -108,7 +166,7 @@ actor TimelineService {
         var seenURLs = Set<String>()
 
         for media in post.media {
-            guard let task = makeTask(from: media, postID: post.id, config: config) else {
+            guard let task = makeTask(from: media, post: post, config: config) else {
                 continue
             }
 
@@ -145,10 +203,36 @@ actor TimelineService {
         )
     }
 
-    private func makeTask(from media: XMediaItem, postID: String, config: DownloadConfig) -> MediaDownloadTask? {
+    private func appendTasks(
+        from posts: [XPost],
+        config: DownloadConfig,
+        scannedPosts: inout Int,
+        tasks: inout [MediaDownloadTask],
+        seenURLs: inout Set<String>
+    ) {
+        for post in posts {
+            if scannedPosts >= config.clampedMaxPosts {
+                break
+            }
+
+            scannedPosts += 1
+            for media in post.media {
+                guard let task = makeTask(from: media, post: post, config: config) else {
+                    continue
+                }
+
+                let dedupeKey = "\(task.kind.rawValue)|\(task.sourceURL.absoluteString)"
+                if seenURLs.insert(dedupeKey).inserted {
+                    tasks.append(task)
+                }
+            }
+        }
+    }
+
+    private func makeTask(from media: XMediaItem, post: XPost, config: DownloadConfig) -> MediaDownloadTask? {
         let kind = MediaDownloadKind(mediaKind: media.kind)
         let safeMediaID = sanitize(media.id)
-        let baseFileName = "\(postID)_\(safeMediaID)"
+        let baseFileName = "\(post.id)_\(safeMediaID)"
 
         switch kind {
         case .photo:
@@ -159,7 +243,10 @@ actor TimelineService {
             let ext = fileExtension(from: preferredURL, fallback: "jpg")
             let targetURL = config.photosDirectory.appendingPathComponent("\(baseFileName).\(ext)")
             return MediaDownloadTask(
-                postID: postID,
+                postID: post.id,
+                postText: post.text,
+                authorScreenName: post.screenName,
+                postURL: post.url,
                 mediaID: safeMediaID,
                 sourceURL: preferredURL,
                 kind: kind,
@@ -174,7 +261,10 @@ actor TimelineService {
             }
             let targetURL = config.videosDirectory.appendingPathComponent("\(baseFileName).mp4")
             return MediaDownloadTask(
-                postID: postID,
+                postID: post.id,
+                postText: post.text,
+                authorScreenName: post.screenName,
+                postURL: post.url,
                 mediaID: safeMediaID,
                 sourceURL: media.url,
                 kind: kind,

@@ -9,6 +9,7 @@ final class AppSettingsStore {
         static let includeVideos = "settings.include_videos"
         static let maxConcurrentDownloads = "settings.max_concurrent_downloads"
         static let baseDirectoryPath = "settings.base_directory_path"
+        static let downloadSource = "settings.download_source"
     }
 
     private let defaults: UserDefaults
@@ -20,6 +21,17 @@ final class AppSettingsStore {
     var screenName: String {
         get { defaults.string(forKey: Keys.screenName) ?? "" }
         set { defaults.set(newValue, forKey: Keys.screenName) }
+    }
+
+    var downloadSource: DownloadSource {
+        get {
+            guard let rawValue = defaults.string(forKey: Keys.downloadSource),
+                  let source = DownloadSource(rawValue: rawValue) else {
+                return .userMedia
+            }
+            return source
+        }
+        set { defaults.set(newValue.rawValue, forKey: Keys.downloadSource) }
     }
 
     var maxPosts: Int {
